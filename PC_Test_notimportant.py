@@ -13,8 +13,10 @@ import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import copy
-
 import predictive_coding as pc
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f'using {device}')
 
 seed = 42
 torch.manual_seed(seed)
@@ -46,15 +48,16 @@ activation_fn = nn.ReLU
 
 pc_model = nn.Sequential(
       nn.Linear(input_size, hidden_size),
-      pc.PCLayer(),         # contains neural activity of layer 2                  
       activation_fn(),
+      pc.PCLayer(),
       nn.Linear(hidden_size, hidden2_size),
-      pc.PCLayer(),         # contains neural activity of layer 1
       activation_fn(),
+      pc.PCLayer(),
       nn.Linear(hidden2_size, output_size)
   )
 
 pc_model.train()
+pc_model.to(device)
 
 # number of neural activity updates
 T = 20                              
@@ -66,19 +69,51 @@ optimizer_p_fn = optim.Adam
 optimizer_p_kwargs = {"lr": 0.001, "weight_decay":0.001} 
 
 trainer = pc.PCTrainer(pc_model, 
-    T = T, 
+    T = T,
+    update_x_at = "all",
     optimizer_x_fn = optimizer_x_fn,
     optimizer_x_kwargs = optimizer_x_kwargs,
     optimizer_p_fn = optimizer_p_fn,
-    optimizer_p_kwargs = optimizer_p_kwargs
+    optimizer_p_kwargs = optimizer_p_kwargs,
+    update_p_at= "last",
+    plot_progress_at=[]
 )
 
-epochs = 10
-
+#define PC loss function
 def loss_fn(output, _target):
     return 0.5*(output - _target).pow(2).sum()
 
-for epoch in range(epochs):
-    for data, label in train_loader:
-        labels_one_hot = F.one_hot(label).float()
-        trainer.train_on_batch(inputs=labels_one_hot, loss_fn=loss_fn, loss_fn_kwargs={'_target':data}, is_log_progress=False, is_return_results_every_t=False, is_checking_after_callback_after_t=False)
+# This class contains the parameters of the prior mean \mu parameter (see figure)
+class BiasLayer(nn.Module):
+    def __init__(self, out_features, offset=0.):
+        super(BiasLayer, self).__init__()
+        self.bias = nn.Parameter(offset*torch.ones(out_features) if offset is not None
+                                  else 2*np.sqrt(out_features)*torch.rand(out_features)-np.sqrt(out_features), requires_grad=True)
+
+    def forward(self, x):
+        return torch.zeros_like(x) + self.bias  # return the prior mean \mu witht the same shape as the input x to make sure the batch size is the same
+
+
+def test_normal(model, dataset, batch_size=1000):
+    test_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    # add bias layer for inferece
+    test_model = nn.Sequential(
+        BiasLayer(10, offset=0.),
+        pc.PCLayer(),
+        model
+    )
+    test_model.train()
+    test_model.to(device)
+
+# make pc_trainer for test_model
+    trainer_normal_test = pc.PCTrainer(test_model,
+        T = 100,
+        update_x_at = "all",
+        optimizer_x_fn = optimizer_x_fn,
+        optimizer_x_kwargs = optimizer_x_kwargs,
+        update_p_at = "never",
+        optimizer_p_fn = optimizer_p_fn,
+        optimizer_p_kwargs = optimizer_p_kwargs,
+        plot_progress_at=[]
+    )
